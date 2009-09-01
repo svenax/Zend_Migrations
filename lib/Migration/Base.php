@@ -9,7 +9,7 @@ class Svenax_Migration_Exception extends Exception {}
  *
  * @package Migration
  */
-class Svenax_Migration_Base
+abstract class Svenax_Migration_Base
 {
     private $verbose;
     private $version;
@@ -35,15 +35,9 @@ class Svenax_Migration_Base
         $this->dbLogger = Zend_Registry::get('dbLogger');
     }
 
-    public function up()
-    {
-        // Override in subclass
-    }
+    public abstract function up();
 
-    public function down()
-    {
-        // override in subclass
-    }
+    public abstract function down();
 
     private function drop()
     {

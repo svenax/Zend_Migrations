@@ -10,7 +10,7 @@
  *     $migration->migrate('20080801000000');  // Migrate to a specific version
  *     $migration->migrate(0);  // Drop all tables and start afresh
  *
- * The code for actual migrations inherit from Svenax_Migration_Abstract
+ * The code for actual migrations inherit from Svenax_Migration_Base
  */
 class Svenax_Migration
 {
