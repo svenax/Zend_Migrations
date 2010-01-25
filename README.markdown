@@ -41,7 +41,7 @@ But for now, migrations just call `query`, `exec`, `queryWithTime`,
 All migrations are stored in separate classes in the `migrations` folder, the
 path to which can be set in the application config file under _db.migrations_.
 
-The migrations file names myst start with a 14-char timestamp, e.g.
+The migrations file names must start with a 14-char timestamp, e.g.
 `20090831162212`, followed by an underscore and a descriptive name that should
 be the same as the migration class name. Migration classes all inherit from
 `Svenax_Migration_Base` and must implement the two methods `up()` and
