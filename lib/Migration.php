@@ -2,32 +2,43 @@
 /**
  * Database migrations based on ideas from Ruby on Rails and Google Gears.
  *
+ * @category  Svenax
+ * @package   Migration
+ * @author    Sven Axelsson <sven@axelsson.name>
+ */
+
+/**
+ * Database migrations based on ideas from Ruby on Rails and Google Gears.
+ *
  * This class contains the migrator interface used to perform the database
  * migrations. Use it like this:
  *
+ *     <pre>
  *     $migration = new Svenax_Migration();
  *     $migration->migrate();  // Migrate to most recent version
  *     $migration->migrate('20080801000000');  // Migrate to a specific version
  *     $migration->migrate(0);  // Drop all tables and start afresh
+ *     </pre>
  *
  * The code for actual migrations inherit from Svenax_Migration_Base
  */
 class Svenax_Migration
 {
     private $verbose = true;
-    private $hiddenTables = array('schema_versions');
+    private $hiddenTables = array('_schema_versions');
+    private $migrationsPath;
     private $db;
 
     public function __construct()
     {
         $this->db = Zend_Registry::get('db');
+        $this->migrationsPath = Zend_Registry::get('migrationsPath');
     }
 
     /**
      * Set to display verbose status information when migrating.
      *
      * @param bool $verbose True if we display status information, false if not
-     * @access public
      */
     public function setVerbose($verbose = true)
     {
@@ -42,8 +53,10 @@ class Svenax_Migration
      * - string: Migrate to a specific version
      * - 0: Drop all tables and start afresh
      *
+     * Try to catch errors inside a transaction, but note that CREATE TABLE
+     * et al can not be rolled back.
+     *
      * @param mixed $goToVersion null, 0, or a version string
-     * @access public
      */
     public function migrate($goToVersion = null)
     {
@@ -56,35 +69,61 @@ class Svenax_Migration
 
         $this->createSchemaVersionsIfNotExists();
 
-        $availableMigrations = $this->getAvailableMigrations(Zend_Registry::get('config')->db->migrations);
+        $availableMigrations = $this->getAvailableMigrations($this->migrationsPath);
         $installedMigrations = $this->getInstalledMigrations();
 
-        if ($goToVersion !== null) {
-            // Any down migrations should be executed in reverse order
-            krsort($availableMigrations);
+        try {
+            $this->db->beginTransaction();
+            if ($goToVersion !== null) {
+                // Any down migrations should be executed in reverse order
+                krsort($availableMigrations);
+                foreach ($availableMigrations as $version => $migration) {
+                    if ($version <= $goToVersion) break;
+                    if (!in_array($version, $installedMigrations)) continue;
+                    Svenax_Migration_Base::run($migration, 'down', $this->verbose);
+                    $didMigrate = true;
+                }
+            }
+
+            ksort($availableMigrations);
             foreach ($availableMigrations as $version => $migration) {
-                if ($version <= $goToVersion) break;
-                if (!in_array($version, $installedMigrations)) continue;
-                Svenax_Migration_Base::run($migration, 'down', $this->verbose);
+                if ($goToVersion !== null && $version > $goToVersion) break;
+                if (in_array($version, $installedMigrations)) continue;
+                Svenax_Migration_Base::run($migration, 'up', $this->verbose);
                 $didMigrate = true;
             }
-        }
-
-        ksort($availableMigrations);
-        foreach ($availableMigrations as $version => $migration) {
-            if ($goToVersion !== null && $version > $goToVersion) break;
-            if (in_array($version, $installedMigrations)) continue;
-            Svenax_Migration_Base::run($migration, 'up', $this->verbose);
-            $didMigrate = true;
+            $this->db->commit();
+        } catch (Svenax_Migration_Exception $e) {
+            Svenax_Migration_Base::abortMessage();
+            $didMigrate = false;
+            $this->db->rollback();
         }
 
         if ($didMigrate) $this->saveCurrentSchema();
     }
 
     /**
+     * Get a list of migrations that have not yet been installed.
+     *
+     * @return array Migrations
+     */
+    public function getMissingMigrations()
+    {
+        $this->createSchemaVersionsIfNotExists();
+
+        $availableMigrations = $this->getAvailableMigrations($this->migrationsPath);
+        $installedMigrations = $this->getInstalledMigrations(true);
+
+        $missingMigrations = array_diff_key($availableMigrations, $installedMigrations);
+        array_walk($missingMigrations, create_function('&$v', '$v = basename($v, ".php");'));
+        ksort($missingMigrations);
+
+        return $missingMigrations;
+    }
+
+    /**
      * Save a dump of the database schema.
      *
-     * @access public
      */
     public function saveCurrentSchema()
     {
@@ -92,7 +131,7 @@ class Svenax_Migration
              . $this->schemaTables()
              . $this->schemaFoot();
 
-        file_put_contents(dirname(Zend_Registry::get('config')->db->migrations) . '/schema_dump.sql', $sql);
+        file_put_contents(dirname($this->migrationsPath) . '/schema_dump.sql', $sql);
     }
 
     // Migration helpers ====================================================
@@ -100,8 +139,8 @@ class Svenax_Migration
     /**
      * Return an array with paths to all available migrations.
      *
-     * @param string $path Folder where the migration files are found
-     * @return array Version => Full path
+     * @param  string  $path Folder where the migration files are found
+     * @return array   Version => Full path
      * @access private
      */
     private function getAvailableMigrations($path)
@@ -119,12 +158,15 @@ class Svenax_Migration
     /**
      * Return an array with the version numbers for all installed migrations.
      *
+     * @param  bool    $flipResultArray Flip values and keys in the return value
      * @return array
      * @access private
      */
-    private function getInstalledMigrations()
+    private function getInstalledMigrations($flipResultArray = false)
     {
-        return $this->db->fetchCol('SELECT version FROM schema_versions');
+        $ret = $this->db->fetchCol('SELECT version FROM _schema_versions');
+
+        return $flipResultArray ? array_flip($ret) : $ret;
     }
 
     /**
@@ -135,10 +177,10 @@ class Svenax_Migration
     private function createSchemaVersionsIfNotExists()
     {
         try {
-            $this->db->describeTable('schema_versions');
+            $this->db->describeTable('_schema_versions');
         } catch (Exception $e) {
-            $this->db->getConnection()->exec(
-                'CREATE TABLE schema_versions (version CHAR(14) NOT NULL PRIMARY KEY)'
+            $this->db->getConnection()->query(
+                'CREATE TABLE _schema_versions (version CHAR(14) NOT NULL PRIMARY KEY)'
             );
         }
     }

@@ -1,5 +1,11 @@
 <?php
-class Svenax_Migration_Exception extends Exception {}
+/**
+ * Database migrations based on ideas from Ruby on Rails and Google Gears.
+ *
+ * @category  Svenax
+ * @package   Migration
+ * @author    Sven Axelsson <sven@axelsson.name>
+ */
 
 /**
  * Database migrations based on ideas from Ruby on Rails and Google Gears.
@@ -9,21 +15,20 @@ class Svenax_Migration_Exception extends Exception {}
  *
  * @package Migration
  */
-abstract class Svenax_Migration_Base
+class Svenax_Migration_Base
 {
     private $verbose;
     private $version;
     private $name;
     protected $db;
-    protected $dbLogger;
+    protected $dbLog;
 
     /**
      * undocumented function
      *
      * @param string $version
      * @param string $name
-     * @param bool $verbose True if we print status text, false if not
-     * @access public
+     * @param bool   $verbose True if we print status text, false if not
      */
     public function __construct($version, $name, $verbose = true)
     {
@@ -32,18 +37,24 @@ abstract class Svenax_Migration_Base
         $this->version = $version;
         $this->name = $name;
         $this->db = Zend_Registry::get('db');
-        $this->dbLogger = Zend_Registry::get('dbLogger');
+        $this->dbLog = Zend_Registry::get('dbLog');
     }
 
-    public abstract function up();
+    public function up()
+    {
+        throw new Svenax_Migration_Exception('Method up must be implemented in subclass.');
+    }
 
-    public abstract function down();
+    public function down()
+    {
+        throw new Svenax_Migration_Exception('Method down must be implemented in subclass.');
+    }
 
     private function drop()
     {
         foreach ($this->db->listTables() as $table) {
             $this->say("Dropping {$table}");
-            $this->db->getConnection()->exec('DROP TABLE ' . $this->db->quoteIdentifier($table));
+            $this->exec('DROP TABLE ' . $this->db->quoteIdentifier($table));
         }
     }
 
@@ -52,11 +63,12 @@ abstract class Svenax_Migration_Base
      * entry point called from the migrator code.
      *
      * @param string $direction One of 'up', 'down', or 'drop'.
-     * @access public
      */
     public function migrate($direction)
     {
-        if (!is_callable(array($this, $direction))) return;
+        if (!is_callable(array($this, $direction))) {
+            throw new Svenax_Migration_Exception("Can not call method '{$direction}'");
+        }
 
         switch ($direction) {
         case 'up':   $this->announce('migrating'); break;
@@ -82,11 +94,12 @@ abstract class Svenax_Migration_Base
      *
      * @param string $fileName
      * @param string $direction
-     * @access public
      */
-    static public function run($fileName, $direction, $verbose)
+    public static function run($fileName, $direction, $verbose)
     {
         if ($direction == 'drop') {
+            // We create a fake instance here since drop is not associated
+            // with any real migration class.
             $dropper = new self('', __CLASS__);
             $dropper->migrate('drop');
             return;
@@ -104,8 +117,19 @@ abstract class Svenax_Migration_Base
             $migration->migrate($direction);
             $migration->updateInstalledVersions($version, $direction);
         } else {
-            throw new Exception("Class '{$class}' is not present in the migration file");
+            $msg = "Class '{$class}' is not present in the migration file";
+            $this->write($msg);
+            throw new Svenax_Migration_Exception($msg);
         }
+    }
+
+    /**
+     * Call this method to inform the user that the migration has been aborted.
+     */
+    public static function abortMessage()
+    {
+        $aborter = new self('', 'ERROR');
+        $aborter->announce('Migration aborted and changes rolled back');
     }
 
     // Info helpers =========================================================
@@ -135,49 +159,7 @@ abstract class Svenax_Migration_Base
     protected function write($text = '')
     {
         if ($this->verbose) echo "$text\n";
-        if (!empty($text)) $this->dbLogger->info($text);
-    }
-
-    // Database manipulators ================================================
-
-    // The idea here is to implement a database independent micro language
-    // to describe the migrations, like Rails does. But for now just use
-    // SQL statements directly in the up and down methods.
-
-    protected function createTable($name, $options = array())
-    {
-        return new Svenax_Migration_TableProxy($this, $name, $options);
-    }
-
-    protected function dropTable($name)
-    {
-        // TODO: Implement this.
-    }
-
-    protected function addField($table, $name, $options = array())
-    {
-        // TODO: Implement this.
-    }
-
-    protected function dropField($table, $name)
-    {
-        // TODO: Implement this.
-    }
-
-    protected function renameField($table, $oldName, $newName)
-    {
-        // TODO: Implement this.
-    }
-
-    protected function dropTimestamps($table, $options)
-    {
-        extract(array_merge(
-            array('created_at' => true, 'updated_at' => true),
-            $options
-        ));
-
-        $this->dropField($table, $created_at === true ? 'created_at' : $created_at);
-        $this->dropField($table, $updated_at === true ? 'updated_at' : $updated_at);
+        if (!empty($text)) $this->dbLog->info($text);
     }
 
     // Migration helpers ====================================================
@@ -185,20 +167,26 @@ abstract class Svenax_Migration_Base
     /**
      * Use for data manipulation in the migrations.
      *
-     * @param string $statement SQL statement
+     * @param  string $statement SQL statement
      * @return mixed
-     * @access protected
      */
     protected function query($statement)
     {
-        return $this->db->getConnection()->query($statement);
+        $con = $this->db->getConnection();
+        $res = $con->query($this->preprocess($statement));
+        if ($res === false) {
+            $this->write("SQL Error ({$con->errno}): {$con->error}");
+            $this->write("When executing query\n{$statement}");
+            throw new Svenax_Migration_Exception($con->error);
+        }
+        return $res;
     }
 
     protected function queryWithMessage($message, $statement)
     {
         $start = microtime(true);
         $res = $this->query($statement);
-        $this->sayWithTime($message, $start, $res->rowCount());
+        $this->sayWithTime($message, $start, is_object($res) ? $res->num_rows() : null);
 
         return $res;
     }
@@ -206,13 +194,12 @@ abstract class Svenax_Migration_Base
     /**
      * Used for schema manipulation in the migrations
      *
-     * @param string $statement SQL statement
+     * @param  string $statement SQL statement
      * @return mixed
-     * @access protected
      */
     protected function exec($statement)
     {
-        return $this->db->getConnection()->exec($statement);
+        return $this->query($statement);
     }
 
     protected function execWithMessage($message, $statement)
@@ -225,20 +212,42 @@ abstract class Svenax_Migration_Base
     }
 
     /**
+     * Keep some standard types through simple string replacement. This should
+     * be implemented in a smarter way.
+     *
+     * @param  string $statement SQL statement
+     * @return string Altered SQL statement
+     */
+    private function preprocess($statement)
+    {
+        $repl = array(
+            '!primary' => 'INT(11) UNSIGNED NOT NULL PRIMARY KEY AUTO_INCREMENT',
+            '!int' => 'INT(11)',
+            '!uint' => 'INT(11) UNSIGNED',
+            '!string' => 'VARCHAR(255)',
+            '!timestamps' => 'updated_at TIMESTAMP NULL, created_at TIMESTAMP NULL',
+            // The first timestamp field will be auto-updated
+            '!autotimestamps' => 'updated_at TIMESTAMP, created_at TIMESTAMP',
+        );
+
+        return str_ireplace(array_keys($repl), array_values($repl), $statement);
+    }
+
+    /**
      * Update the schema_versions table with the given version.
      *
-     * @param string $version
-     * @param string $direction
+     * @param  string  $version
+     * @param  string  $direction
      * @access private
      */
     private function updateInstalledVersions($version, $direction)
     {
         switch ($direction) {
         case 'up':
-            $this->db->insert('schema_versions', array('version' => $version));
+            $this->db->insert('_schema_versions', array('version' => $version));
             break;
         case 'down':
-            $this->db->delete('schema_versions', $this->db->quoteInto('version = ?', $version));
+            $this->db->delete('_schema_versions', $this->db->quoteInto('version = ?', $version));
             break;
         }
     }
