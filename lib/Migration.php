@@ -147,7 +147,7 @@ class Svenax_Migration
     {
         $migrations = array();
         foreach (new DirectoryIterator($path) as $file) {
-            if (preg_match('/(\d{14})_(.+)\.php$/', $file->getFilename(), $matches)) {
+            if (preg_match('/^(\d{14})_(.+)\.php$/', $file->getFilename(), $matches)) {
                 $migrations[$matches[1]] = $file->getPathname();
             }
         }
